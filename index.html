@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nachhilfe Rechnungs-Tool (Cloud)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Spezielle Druck-Formatierungen */
+        @media print {
+            body { background-color: white !important; padding: 0 !important; }
+            .no-print { display: none !important; }
+            .print-container { box-shadow: none !important; padding: 0 !important; margin: 0 !important; max-width: 100% !important; border: none !important; }
+            @page { margin: 2cm; }
+        }
+        
+        /* Sanfte Übergänge */
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans p-4 md:p-8 print:p-0 print:bg-white min-h-screen">
+
+    <div id="root"></div>
+
+    <!-- 
+        =============================================================================
+        FIREBASE KONFIGURATION & SETUP
+        =============================================================================
+        Ersetze die Werte in "defaultFirebaseConfig" mit den echten Werten aus 
+        deinem Firebase-Projekt (Project Settings > General > Web App).
+    -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // PLATZHALTER: Füge hier deine eigenen Firebase-Zugangsdaten ein
+        const firebaseConfig = {
+  apiKey: "AIzaSyDVNGKeNJZALJ2YgipkANITdTCvN9N7Sd0",
+  authDomain: "nachhilfe-daeb1.firebaseapp.com",
+  projectId: "nachhilfe-daeb1",
+  storageBucket: "nachhilfe-daeb1.firebasestorage.app",
+  messagingSenderId: "173681541704",
+  appId: "1:173681541704:web:5281a2c3a6aa785c1e8e7d",
+  measurementId: "G-H3YYXEK0KE"
+};
+        };
+
+        // System-Environment Variablen bevorzugen, falls vorhanden (für die Cloud-Umgebung)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : defaultFirebaseConfig;
+        
+        // Exponiere die Konfiguration und Module global für React
+        window.firebaseConfig = firebaseConfig;
+        window.fbApp = initializeApp(firebaseConfig);
+        window.fbAuth = getAuth(window.fbApp);
+        window.fbDb = getFirestore(window.fbApp);
+        
+        window.fbMethods = {
+            signInAnonymously, signInWithCustomToken, collection, addDoc, onSnapshot, serverTimestamp
+        };
+        
+        // Signalisiere React, dass Firebase bereit ist
+        window.dispatchEvent(new Event('firebase-ready'));
+    </script>
+
+    <!-- REACT APP LOGIK -->
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function App() {
+            // App & User State
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'nachhilfe-rechnung-app';
+            const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+            const [user, setUser] = useState(null);
+            const [invoices, setInvoices] = useState([]);
+            
+            // Tab Navigation: 'generator', 'dashboard', 'printView'
+            const [activeTab, setActiveTab] = useState('generator');
+            const [isLoading, setIsLoading] = useState(true);
+            const [errorMessage, setErrorMessage] = useState('');
+
+            // Rechnungsdaten (State)
+            const today = new Date().toISOString().split('T')[0];
+            const [tutorName, setTutorName] = useState('');
+            const [studentName, setStudentName] = useState('');
+            const [subject, setSubject] = useState('Nachhilfe');
+            const [date, setDate] = useState(today);
+            const [hourlyRate, setHourlyRate] = useState(15);
+            const [hours, setHours] = useState(1);
+            const [minutes, setMinutes] = useState(30);
+            
+            // Bankdaten (State)
+            const [bankOwner, setBankOwner] = useState('');
+            const [bankName, setBankName] = useState('');
+            const [iban, setIban] = useState('');
+            const [bic, setBic] = useState('');
+            const [total, setTotal] = useState('0.00');
+
+            // Aktuelle Rechnung für den Print (damit die Vorschau fixiert ist)
+            const [currentPrintInvoice, setCurrentPrintInvoice] = useState(null);
+
+            // Firebase initialisieren und Auth-Status prüfen
+            useEffect(() => {
+                const initFirebase = async () => {
+                    const { fbAuth, fbMethods, firebaseConfig } = window;
+                    try {
+                        // Prüfen ob noch Platzhalter verwendet werden
+                        if (firebaseConfig && firebaseConfig.apiKey === "YOUR_API_KEY") {
+                            setErrorMessage("Firebase ist noch nicht konfiguriert! Bitte ersetze 'YOUR_API_KEY' & 'YOUR_PROJECT_ID' in der HTML-Datei durch deine echten Zugangsdaten aus Schritt 4 der Anleitung.");
+                            setIsLoading(false);
+                            return;
+                        }
+
+                        // Auth-Logik
+                        if (typeof __initial_auth_token !== 'undefined') {
+                            await fbMethods.signInWithCustomToken(fbAuth, __initial_auth_token);
+                        } else {
+                            await fbMethods.signInAnonymously(fbAuth);
+                        }
+                        setUser(fbAuth.currentUser);
+                    } catch (error) {
+                        console.error("Auth Error:", error);
+                        setErrorMessage("Fehler bei der Firebase-Anmeldung: " + error.message + ". Stelle sicher, dass du Schritt 2 (Anonyme Anmeldung) in Firebase aktiviert hast.");
+                        setIsLoading(false);
+                    }
+                };
+
+                if (window.fbMethods) {
+                    initFirebase();
+                } else {
+                    window.addEventListener('firebase-ready', initFirebase);
+                    return () => window.removeEventListener('firebase-ready', initFirebase);
+                }
+            }, []);
+
+            // Rechnungen laden, sobald User eingeloggt ist
+            useEffect(() => {
+                let unsubscribe = null;
+                
+                if (user) {
+                    const { fbDb, fbMethods } = window;
+                    const path = fbMethods.collection(fbDb, 'artifacts', appId, 'users', user.uid, 'invoices');
+                    
+                    unsubscribe = fbMethods.onSnapshot(path, (snapshot) => {
+                        const data = [];
+                        snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
+                        
+                        // Sortieren im Memory (neueste zuerst)
+                        data.sort((a, b) => new Date(b.date) - new Date(a.date));
+                        setInvoices(data);
+                        setIsLoading(false);
+
+                        // Lade bekannte Bankdaten/Tutorname aus der letzten Rechnung, falls Formular leer
+                        if (data.length > 0 && !bankOwner && !tutorName) {
+                            const last = data[0];
+                            if(last.tutorName) setTutorName(last.tutorName);
+                            if(last.bankOwner) setBankOwner(last.bankOwner);
+                            if(last.bankName) setBankName(last.bankName);
+                            if(last.iban) setIban(last.iban);
+                            if(last.bic) setBic(last.bic);
+                        }
+
+                    }, (err) => {
+                        console.error("Error fetching invoices:", err);
+                        setErrorMessage("Fehler beim Laden aus Firestore: " + err.message + ". Prüfe bitte deine Sicherheitsregeln (Schritt 5).");
+                        setIsLoading(false);
+                    });
+                }
+                
+                return () => { if (unsubscribe) unsubscribe(); };
+            }, [user]);
+
+            // Automatische Total-Berechnung
+            useEffect(() => {
+                const rate = parseFloat(hourlyRate) || 0;
+                const h = parseInt(hours) || 0;
+                const m = parseInt(minutes) || 0;
+                const calculatedTotal = rate * (h + (m / 60));
+                setTotal(calculatedTotal.toFixed(2));
+            }, [hourlyRate, hours, minutes]);
+
+            // Speichern in Firebase & Wechsel zur Vorschau
+            const handleSaveAndPrint = async () => {
+                if (!user) return;
+                
+                const invoiceData = {
+                    date, tutorName, studentName, subject, 
+                    hourlyRate: parseFloat(hourlyRate), hours: parseInt(hours), minutes: parseInt(minutes), 
+                    total, bankOwner, bankName, iban, bic,
+                    createdAt: new Date().toISOString() // Für einfache Sortierung
+                };
+
+                try {
+                    const { fbDb, fbMethods } = window;
+                    const path = fbMethods.collection(fbDb, 'artifacts', appId, 'users', user.uid, 'invoices');
+                    await fbMethods.addDoc(path, invoiceData);
+                    
+                    setCurrentPrintInvoice(invoiceData);
+                    setActiveTab('printView');
+                } catch (error) {
+                    console.error("Fehler beim Speichern:", error);
+                }
+            };
+
+            const handlePrint = () => {
+                window.print();
+            };
+
+            // Berechne Gesamtumsatz für das Dashboard
+            const totalEarnings = invoices.reduce((sum, inv) => sum + parseFloat(inv.total), 0).toFixed(2);
+
+
+            // -------------------------------------------------------------
+            // RENDER LOGIK
+            // -------------------------------------------------------------
+
+            if (isLoading) {
+                return (
+                    <div className="flex flex-col justify-center items-center h-64 text-gray-500">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
+                        <p className="font-medium">Verbinde mit Firebase Cloud...</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="max-w-5xl mx-auto">
+                    {/* Hinweisbanner falls Firebase-Zugangsdaten oder Regeln noch fehlen */}
+                    {errorMessage && (
+                        <div className="no-print bg-amber-50 border-l-4 border-amber-500 p-4 mb-6 rounded-r-lg shadow-sm">
+                            <div className="flex items-start">
+                                <span className="text-amber-500 text-2xl mr-3">⚠️</span>
+                                <div>
+                                    <h3 className="font-bold text-amber-800">Firebase Konfigurations-Hinweis</h3>
+                                    <p className="text-amber-700 text-sm mt-1">{errorMessage}</p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Navigation (Ausgeblendet beim Drucken) */}
+                    {activeTab !== 'printView' && (
+                        <div className="no-print bg-white rounded-xl shadow-sm mb-6 p-2 flex space-x-2 border border-gray-200">
+                            <button 
+                                onClick={() => setActiveTab('generator')}
+                                className={`flex-1 py-3 px-4 rounded-lg font-medium transition ${activeTab === 'generator' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}`}
+                            >
+                                ➕ Neue Rechnung erstellen
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('dashboard')}
+                                className={`flex-1 py-3 px-4 rounded-lg font-medium transition ${activeTab === 'dashboard' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}`}
+                            >
+                                📊 Dashboard ({invoices.length})
+                            </button>
+                        </div>
+                    )}
+
+                    {/* -------------------------------------------------------- */}
+                    {/* ANSICHT 1: GENERATOR (Neue Rechnung)                     */}
+                    {/* -------------------------------------------------------- */}
+                    {activeTab === 'generator' && (
+                        <div className="bg-white p-6 md:p-10 rounded-xl shadow-lg fade-in border border-gray-100">
+                            <div className="text-center mb-8">
+                                <h1 className="text-3xl font-bold text-blue-600 mb-2">Rechnungs-Generator</h1>
+                                <p className="text-gray-500">Erstelle eine neue Nachhilfe-Rechnung. Die Daten werden sicher gespeichert.</p>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                {/* Linke Spalte */}
+                                <div className="space-y-4 bg-gray-50 p-5 rounded-lg border border-gray-200">
+                                    <h2 className="text-xl font-semibold text-gray-700 border-b pb-2">Rechnungsdaten</h2>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-600 mb-1">Dein Name (Lehrer)</label>
+                                        <input type="text" value={tutorName} onChange={e => setTutorName(e.target.value)} placeholder="Max Mustermann" className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-600 mb-1">Name des Schülers / Eltern</label>
+                                        <input type="text" value={studentName} onChange={e => setStudentName(e.target.value)} placeholder="Familie Schmidt" className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-600 mb-1">Fach / Thema</label>
+                                        <input type="text" value={subject} onChange={e => setSubject(e.target.value)} placeholder="Mathe Nachhilfe" className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-600 mb-1">Datum der Nachhilfe</label>
+                                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none" />
+                                    </div>
+                                </div>
+
+                                {/* Rechte Spalte */}
+                                <div className="space-y-4 bg-blue-50 p-5 rounded-lg border border-blue-200">
+                                    <h2 className="text-xl font-semibold text-blue-800 border-b border-blue-200 pb-2">Zeiterfassung</h2>
+                                    <div>
+                                        <label className="block text-sm font-medium text-blue-800 mb-1">Stundenlohn (€)</label>
+                                        <input type="number" min="0" step="0.5" value={hourlyRate} onChange={e => setHourlyRate(e.target.value)} className="w-full p-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none bg-white" />
+                                    </div>
+                                    <div className="flex space-x-4">
+                                        <div className="flex-1">
+                                            <label className="block text-sm font-medium text-blue-800 mb-1">Stunden</label>
+                                            <input type="number" min="0" value={hours} onChange={e => setHours(e.target.value)} className="w-full p-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none bg-white" />
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="block text-sm font-medium text-blue-800 mb-1">Minuten</label>
+                                            <input type="number" min="0" max="59" value={minutes} onChange={e => setMinutes(e.target.value)} className="w-full p-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-400 outline-none bg-white" />
+                                        </div>
+                                    </div>
+                                    {/* Ergebnis */}
+                                    <div className="mt-6 pt-4 border-t border-blue-200 text-right">
+                                        <p className="text-sm text-blue-600 mb-1">Gesamtbetrag:</p>
+                                        <p className="text-4xl font-bold text-blue-900">{total.replace('.', ',')} €</p>
+                                    </div>
+                                </div>
+
+                                {/* Bankverbindung */}
+                                <div className="col-span-1 md:col-span-2 space-y-4 bg-emerald-50 p-5 rounded-lg border border-emerald-200">
+                                    <h2 className="text-xl font-semibold text-emerald-800 border-b border-emerald-200 pb-2">Bankverbindung für Zahlung</h2>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-emerald-800 mb-1">Kontoinhaber</label>
+                                            <input type="text" value={bankOwner} onChange={e => setBankOwner(e.target.value)} placeholder="Max Mustermann" className="w-full p-2 border border-emerald-300 rounded-md focus:ring-2 focus:ring-emerald-400 outline-none" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-emerald-800 mb-1">Name der Bank</label>
+                                            <input type="text" value={bankName} onChange={e => setBankName(e.target.value)} placeholder="Sparkasse" className="w-full p-2 border border-emerald-300 rounded-md focus:ring-2 focus:ring-emerald-400 outline-none" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-emerald-800 mb-1">IBAN</label>
+                                            <input type="text" value={iban} onChange={e => setIban(e.target.value)} placeholder="DE12 3456 ..." className="w-full p-2 border border-emerald-300 rounded-md focus:ring-2 focus:ring-emerald-400 outline-none uppercase font-mono tracking-wide" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-emerald-800 mb-1">BIC</label>
+                                            <input type="text" value={bic} onChange={e => setBic(e.target.value)} placeholder="ABCDEF12XXX" className="w-full p-2 border border-emerald-300 rounded-md focus:ring-2 focus:ring-emerald-400 outline-none uppercase font-mono tracking-wide" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="mt-8 text-center border-t border-gray-200 pt-6">
+                                <button 
+                                    onClick={handleSaveAndPrint}
+                                    disabled={!studentName}
+                                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105"
+                                >
+                                    💾 Speichern & als PDF anzeigen
+                                </button>
+                                {!studentName && <p className="text-red-500 text-sm mt-2">Bitte gib den Namen des Schülers ein, um zu speichern.</p>}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* -------------------------------------------------------- */}
+                    {/* ANSICHT 2: DASHBOARD                                     */}
+                    {/* -------------------------------------------------------- */}
+                    {activeTab === 'dashboard' && (
+                        <div className="bg-white p-6 rounded-xl shadow-lg fade-in border border-gray-100 min-h-[500px]">
+                            <div className="flex flex-col md:flex-row justify-between items-center mb-8 border-b pb-6 border-gray-100">
+                                <div>
+                                    <h1 className="text-3xl font-bold text-gray-800">Deine Rechnungen</h1>
+                                    <p className="text-gray-500">Alle gespeicherten Nachhilfe-Sitzungen in der Cloud.</p>
+                                </div>
+                                <div className="mt-4 md:mt-0 bg-emerald-100 border border-emerald-200 px-6 py-4 rounded-lg shadow-inner text-right">
+                                    <p className="text-emerald-700 text-sm font-bold uppercase tracking-wide">Gesamtumsatz</p>
+                                    <p className="text-3xl font-black text-emerald-900">{totalEarnings.replace('.', ',')} €</p>
+                                </div>
+                            </div>
+
+                            {invoices.length === 0 ? (
+                                <div className="text-center py-20 text-gray-400">
+                                    <p className="text-xl mb-4">Noch keine Rechnungen vorhanden.</p>
+                                    <button onClick={() => setActiveTab('generator')} className="text-blue-600 hover:underline font-medium">Erste Rechnung erstellen →</button>
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                    <table className="w-full text-left border-collapse">
+                                        <thead>
+                                            <tr className="bg-gray-50 text-gray-600 border-b border-gray-200">
+                                                <th className="py-3 px-4 font-semibold">Datum</th>
+                                                <th className="py-3 px-4 font-semibold">Schüler</th>
+                                                <th className="py-3 px-4 font-semibold">Fach</th>
+                                                <th className="py-3 px-4 font-semibold">Dauer</th>
+                                                <th className="py-3 px-4 font-semibold text-right">Betrag</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {invoices.map(inv => (
+                                                <tr key={inv.id} className="border-b border-gray-100 hover:bg-gray-50 transition">
+                                                    <td className="py-3 px-4 text-gray-700">{inv.date.split('-').reverse().join('.')}</td>
+                                                    <td className="py-3 px-4 font-medium text-gray-900">{inv.studentName}</td>
+                                                    <td className="py-3 px-4 text-gray-600">{inv.subject}</td>
+                                                    <td className="py-3 px-4 text-gray-600">{inv.hours}h {inv.minutes}m</td>
+                                                    <td className="py-3 px-4 font-bold text-gray-900 text-right">{inv.total.replace('.', ',')} €</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* -------------------------------------------------------- */}
+                    {/* ANSICHT 3: DRUCKVORSCHAU (PRINT)                         */}
+                    {/* -------------------------------------------------------- */}
+                    {activeTab === 'printView' && currentPrintInvoice && (
+                        <div className="bg-white p-10 rounded-xl shadow-lg print-container text-gray-800 fade-in border border-gray-200">
+                            
+                            {/* Action-Bar (wird beim Drucken versteckt) */}
+                            <div className="no-print mb-8 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-gray-200 pb-4">
+                                <button onClick={() => setActiveTab('dashboard')} className="text-gray-600 hover:text-gray-900 flex items-center font-medium transition">
+                                    ← Zurück zum Dashboard
+                                </button>
+                                <button onClick={handlePrint} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg shadow transition-colors">
+                                    🖨️ Jetzt Drucken / PDF speichern
+                                </button>
+                            </div>
+
+                            {/* Rechnungskopf */}
+                            <div className="flex justify-between items-start mb-12">
+                                <div>
+                                    <h1 className="text-4xl font-light text-blue-900 tracking-wide mb-2">RECHNUNG</h1>
+                                    <p className="text-gray-500">Datum: <span className="font-medium text-gray-800">{currentPrintInvoice.date.split('-').reverse().join('.')}</span></p>
+                                </div>
+                            </div>
+
+                            {/* Adressblock */}
+                            <div className="grid grid-cols-2 gap-8 mb-12 bg-gray-50 p-6 rounded-lg border border-gray-100">
+                                <div>
+                                    <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-2">Von</h3>
+                                    <p className="font-semibold text-lg">{currentPrintInvoice.tutorName || "Nachhilfelehrer"}</p>
+                                </div>
+                                <div className="text-right">
+                                    <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-2">An</h3>
+                                    <p className="font-semibold text-lg">{currentPrintInvoice.studentName}</p>
+                                </div>
+                            </div>
+
+                            {/* Positionen */}
+                            <div className="mb-10">
+                                <table className="w-full text-left border-collapse">
+                                    <thead>
+                                        <tr className="border-b-2 border-gray-300 text-gray-600">
+                                            <th className="py-3 font-semibold w-1/2">Leistung</th>
+                                            <th className="py-3 font-semibold text-center">Dauer</th>
+                                            <th className="py-3 font-semibold text-right">Stundensatz</th>
+                                            <th className="py-3 font-semibold text-right">Gesamt</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-b border-gray-100">
+                                            <td className="py-4 text-gray-800">{currentPrintInvoice.subject}</td>
+                                            <td className="py-4 text-center text-gray-800">{currentPrintInvoice.hours}h {currentPrintInvoice.minutes}m</td>
+                                            <td className="py-4 text-right text-gray-800">{currentPrintInvoice.hourlyRate.toFixed(2).replace('.', ',')} €</td>
+                                            <td className="py-4 text-right font-bold text-gray-900">{currentPrintInvoice.total.replace('.', ',')} €</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            {/* Summe */}
+                            <div className="flex justify-end mb-16">
+                                <div className="text-right bg-blue-50 py-4 px-6 rounded-lg inline-block border border-blue-100">
+                                    <p className="text-blue-800 text-sm font-semibold mb-1 uppercase tracking-wider">Rechnungsbetrag</p>
+                                    <p className="text-3xl font-bold text-blue-900">{currentPrintInvoice.total.replace('.', ',')} €</p>
+                                </div>
+                            </div>
+
+                            {/* Footer / Bank */}
+                            <div className="border-t-2 border-gray-100 pt-8 mt-auto">
+                                <h3 className="text-gray-800 font-bold mb-2">Zahlungsinformationen</h3>
+                                <p className="text-sm text-gray-600 mb-4">Bitte überweisen Sie den fälligen Betrag innerhalb von 7 Tagen auf das folgende Konto:</p>
+                                
+                                <div className="bg-emerald-50 border border-emerald-100 p-5 rounded-lg grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm text-gray-800">
+                                    <div>
+                                        <span className="block text-emerald-700 text-xs font-bold uppercase mb-1">Kontoinhaber</span> 
+                                        {currentPrintInvoice.bankOwner || "-"}
+                                    </div>
+                                    <div>
+                                        <span className="block text-emerald-700 text-xs font-bold uppercase mb-1">Bank</span> 
+                                        {currentPrintInvoice.bankName || "-"}
+                                    </div>
+                                    <div>
+                                        <span className="block text-emerald-700 text-xs font-bold uppercase mb-1">IBAN</span> 
+                                        <span className="font-mono tracking-wider">{currentPrintInvoice.iban || "-"}</span>
+                                    </div>
+                                    <div>
+                                        <span className="block text-emerald-700 text-xs font-bold uppercase mb-1">BIC</span> 
+                                        <span className="font-mono tracking-wider">{currentPrintInvoice.bic || "-"}</span>
+                                    </div>
+                                </div>
+                                <p className="text-center text-sm text-gray-500 mt-8 font-medium">Vielen Dank für das Vertrauen!</p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
