@@ -41,16 +41,15 @@
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // PLATZHALTER: Füge hier deine eigenen Firebase-Zugangsdaten ein
-        const firebaseConfig = {
-  apiKey: "AIzaSyDVNGKeNJZALJ2YgipkANITdTCvN9N7Sd0",
-  authDomain: "nachhilfe-daeb1.firebaseapp.com",
-  projectId: "nachhilfe-daeb1",
-  storageBucket: "nachhilfe-daeb1.firebasestorage.app",
-  messagingSenderId: "173681541704",
-  appId: "1:173681541704:web:5281a2c3a6aa785c1e8e7d",
-  measurementId: "G-H3YYXEK0KE"
-};
+        // Firebase-Zugangsdaten
+        const defaultFirebaseConfig = {
+            apiKey: "AIzaSyDVNGKeNJZALJ2YgipkANITdTCvN9N7Sd0",
+            authDomain: "nachhilfe-daeb1.firebaseapp.com",
+            projectId: "nachhilfe-daeb1",
+            storageBucket: "nachhilfe-daeb1.firebasestorage.app",
+            messagingSenderId: "173681541704",
+            appId: "1:173681541704:web:5281a2c3a6aa785c1e8e7d",
+            measurementId: "G-H3YYXEK0KE"
         };
 
         // System-Environment Variablen bevorzugen, falls vorhanden (für die Cloud-Umgebung)
