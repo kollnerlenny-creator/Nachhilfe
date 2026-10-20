@@ -29,14 +29,9 @@
 
     <div id="root"></div>
 
-    <!-- 
-        =============================================================================
-        FIREBASE KONFIGURATION & SETUP
-        =============================================================================
-    -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, deleteDoc, doc, setDoc, updateDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase-Zugangsdaten
@@ -50,7 +45,6 @@
             measurementId: "G-H3YYXEK0KE"
         };
 
-        // System-Environment Variablen bevorzugen, falls vorhanden (für die Cloud-Umgebung)
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : defaultFirebaseConfig;
         
         // Exponiere die Konfiguration und Module global für React
@@ -60,19 +54,16 @@
         window.fbDb = getFirestore(window.fbApp);
         
         window.fbMethods = {
-            signInAnonymously, signInWithCustomToken, collection, addDoc, deleteDoc, doc, setDoc, updateDoc, onSnapshot, serverTimestamp
+            signInAnonymously, signInWithCustomToken, onAuthStateChanged, collection, addDoc, deleteDoc, doc, setDoc, updateDoc, onSnapshot, serverTimestamp
         };
         
-        // Signalisiere React, dass Firebase bereit ist
         window.dispatchEvent(new Event('firebase-ready'));
     </script>
 
-    <!-- REACT APP LOGIK -->
     <script type="text/babel">
         const { useState, useEffect } = React;
 
         function App() {
-            // App & User State
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'nachhilfe-rechnung-app';
             const [user, setUser] = useState(null);
             const [invoices, setInvoices] = useState([]);
@@ -81,9 +72,11 @@
             const [activeTab, setActiveTab] = useState('generator');
             const [isLoading, setIsLoading] = useState(true);
             const [errorMessage, setErrorMessage] = useState('');
+            const [settingsSavedMessage, setSettingsSavedMessage] = useState('');
 
             // ID der aktuell bearbeiteten Rechnung (null = neue Rechnung)
             const [editingInvoiceId, setEditingInvoiceId] = useState(null);
+            const [deletingInvoiceId, setDeletingInvoiceId] = useState(null);
 
             // Rechnungsdaten (State)
             const today = new Date().toISOString().split('T')[0];
@@ -102,33 +95,110 @@
             const [bic, setBic] = useState('');
             const [total, setTotal] = useState('0.00');
 
-            // Benachrichtigung für Einstellungen
-            const [settingsSaved, setSettingsSaved] = useState(false);
+            // Dauerhaft gespeicherte Stammdaten
+            const [savedSettings, setSavedSettings] = useState({
+                tutorName: '',
+                hourlyRate: 15,
+                bankOwner: '',
+                bankName: '',
+                iban: '',
+                bic: ''
+            });
 
-            // Aktuelle Rechnung für den Print (damit die Vorschau fixiert ist)
+            // Aktuelle Rechnung für den Print
             const [currentPrintInvoice, setCurrentPrintInvoice] = useState(null);
 
-            // Einstellungen laden
-            const loadSavedSettings = () => {
+            useEffect(() => {
                 const saved = localStorage.getItem('nachhilfe_settings');
                 if (saved) {
                     try {
                         const parsed = JSON.parse(saved);
+                        setSavedSettings(parsed);
                         if (parsed.tutorName) setTutorName(parsed.tutorName);
                         if (parsed.hourlyRate) setHourlyRate(parsed.hourlyRate);
                         if (parsed.bankOwner) setBankOwner(parsed.bankOwner);
                         if (parsed.bankName) setBankName(parsed.bankName);
                         if (parsed.iban) setIban(parsed.iban);
                         if (parsed.bic) setBic(parsed.bic);
-                        return parsed;
                     } catch (e) {
-                        console.error("Fehler beim Lesen der Einstellungen", e);
+                        console.error("Fehler beim Laden der Einstellungen", e);
                     }
                 }
-                return null;
-            };
+            }, []);
 
-            // Formular für neue Rechnung zurücksetzen
+            useEffect(() => {
+                let unsubscribeSnapshot = null;
+
+                // Sicherheits-Timeout (max 3,5 Sekunden laden, dann App anzeigen)
+                const fallbackTimeout = setTimeout(() => {
+                    setIsLoading(false);
+                }, 3500);
+
+                const initFirebase = async () => {
+                    const { fbAuth, fbDb, fbMethods } = window;
+                    if (!fbAuth || !fbMethods) return;
+
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await fbMethods.signInWithCustomToken(fbAuth, __initial_auth_token);
+                        } else if (!fbAuth.currentUser) {
+                            await fbMethods.signInAnonymously(fbAuth);
+                        }
+
+                        const currentUser = fbAuth.currentUser;
+                        setUser(currentUser);
+
+                        if (currentUser) {
+                            const path = fbMethods.collection(fbDb, 'artifacts', appId, 'users', currentUser.uid, 'invoices');
+                            unsubscribeSnapshot = fbMethods.onSnapshot(path, (snapshot) => {
+                                const loadedInvoices = [];
+                                snapshot.forEach(doc => {
+                                    loadedInvoices.push({ id: doc.id, ...doc.data() });
+                                });
+                                loadedInvoices.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+                                setInvoices(loadedInvoices);
+                                setIsLoading(false);
+                                clearTimeout(fallbackTimeout);
+                            }, (err) => {
+                                console.error("Firestore Snapshot-Fehler:", err);
+                                setErrorMessage("Hinweis zum Laden: " + err.message);
+                                setIsLoading(false);
+                                clearTimeout(fallbackTimeout);
+                            });
+                        } else {
+                            setIsLoading(false);
+                            clearTimeout(fallbackTimeout);
+                        }
+                    } catch (error) {
+                        console.error("Auth-Fehler:", error);
+                        setErrorMessage("Fehler bei der Anmeldung: " + error.message);
+                        setIsLoading(false);
+                        clearTimeout(fallbackTimeout);
+                    }
+                };
+
+                if (window.fbMethods && window.fbAuth) {
+                    initFirebase();
+                } else {
+                    const handleReady = () => initFirebase();
+                    window.addEventListener('firebase-ready', handleReady);
+                    return () => window.removeEventListener('firebase-ready', handleReady);
+                }
+
+                return () => {
+                    clearTimeout(fallbackTimeout);
+                    if (unsubscribeSnapshot) unsubscribeSnapshot();
+                };
+            }, []);
+
+            useEffect(() => {
+                const rate = parseFloat(hourlyRate) || 0;
+                const h = parseInt(hours) || 0;
+                const m = parseInt(minutes) || 0;
+                const calculatedTotal = rate * (h + (m / 60));
+                setTotal(calculatedTotal.toFixed(2));
+            }, [hourlyRate, hours, minutes]);
+
             const handleNewInvoiceClick = () => {
                 setEditingInvoiceId(null);
                 setStudentName('');
@@ -137,12 +207,16 @@
                 setHours(1);
                 setMinutes(30);
                 
-                // Stammdaten/Einstellungen beibehalten
-                loadSavedSettings();
+                // Vorausfüllen mit gespeicherten Stammdaten
+                setTutorName(savedSettings.tutorName || '');
+                setHourlyRate(savedSettings.hourlyRate || 15);
+                setBankOwner(savedSettings.bankOwner || '');
+                setBankName(savedSettings.bankName || '');
+                setIban(savedSettings.iban || '');
+                setBic(savedSettings.bic || '');
                 setActiveTab('generator');
             };
 
-            // Rechnung zur Bearbeitung im Formular öffnen
             const handleEditInvoice = (inv) => {
                 setEditingInvoiceId(inv.id);
                 setTutorName(inv.tutorName || '');
@@ -159,22 +233,26 @@
                 setActiveTab('generator');
             };
 
-            // Rechnung in der Druckansicht öffnen
             const handleViewInvoice = (inv) => {
                 setCurrentPrintInvoice(inv);
                 setActiveTab('printView');
             };
 
-            // Einstellungen in LocalStorage speichern
             const handleSaveSettings = (e) => {
                 e.preventDefault();
-                const settingsData = { tutorName, hourlyRate, bankOwner, bankName, iban, bic };
-                localStorage.setItem('nachhilfe_settings', JSON.stringify(settingsData));
-                setSettingsSaved(true);
-                setTimeout(() => setSettingsSaved(false), 3000);
+                localStorage.setItem('nachhilfe_settings', JSON.stringify(savedSettings));
+                
+                if (savedSettings.tutorName) setTutorName(savedSettings.tutorName);
+                if (savedSettings.hourlyRate) setHourlyRate(savedSettings.hourlyRate);
+                if (savedSettings.bankOwner) setBankOwner(savedSettings.bankOwner);
+                if (savedSettings.bankName) setBankName(savedSettings.bankName);
+                if (savedSettings.iban) setIban(savedSettings.iban);
+                if (savedSettings.bic) setBic(savedSettings.bic);
+
+                setSettingsSavedMessage("Einstellung erfolgreich gespeichert!");
+                setTimeout(() => setSettingsSavedMessage(''), 3000);
             };
 
-            // Speichern/Aktualisieren in Firebase & Wechsel zur Vorschau
             const handleSaveAndPrint = async () => {
                 if (!user) return;
                 
@@ -189,12 +267,10 @@
                     const { fbDb, fbMethods } = window;
                     
                     if (editingInvoiceId) {
-                        // Bestehende Rechnung aktualisieren
                         const docRef = fbMethods.doc(fbDb, 'artifacts', appId, 'users', user.uid, 'invoices', editingInvoiceId);
                         await fbMethods.updateDoc(docRef, invoiceData);
                         setCurrentPrintInvoice({ id: editingInvoiceId, ...invoiceData });
                     } else {
-                        // Neue Rechnung erstellen
                         invoiceData.createdAt = new Date().toISOString();
                         const path = fbMethods.collection(fbDb, 'artifacts', appId, 'users', user.uid, 'invoices');
                         const docRef = await fbMethods.addDoc(path, invoiceData);
@@ -204,21 +280,20 @@
                     setActiveTab('printView');
                 } catch (error) {
                     console.error("Fehler beim Speichern:", error);
-                    alert("Fehler beim Speichern der Rechnung: " + error.message);
+                    setErrorMessage("Fehler beim Speichern der Rechnung: " + error.message);
                 }
             };
 
-            // Rechnung löschen
             const handleDeleteInvoice = async (invoiceId) => {
                 if (!user) return;
-                if (!window.confirm("Möchtest du diese Rechnung wirklich löschen?")) return;
-
                 try {
                     const { fbDb, fbMethods } = window;
                     const docRef = fbMethods.doc(fbDb, 'artifacts', appId, 'users', user.uid, 'invoices', invoiceId);
                     await fbMethods.deleteDoc(docRef);
+                    setDeletingInvoiceId(null);
                 } catch (error) {
                     console.error("Fehler beim Löschen:", error);
+                    setErrorMessage("Fehler beim Löschen: " + error.message);
                 }
             };
 
@@ -226,34 +301,33 @@
                 window.print();
             };
 
-            // Berechne Gesamtumsatz für das Dashboard
-            const totalEarnings = invoices.reduce((sum, inv) => sum + parseFloat(inv.total), 0).toFixed(2);
+            const totalEarnings = invoices.reduce((sum, inv) => sum + (parseFloat(inv.total) || 0), 0).toFixed(2);
 
             if (isLoading) {
                 return (
                     <div className="flex flex-col justify-center items-center h-64 text-gray-500">
                         <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
-                        <p className="font-medium">Verbinde mit Firebase Cloud...</p>
+                        <p className="font-medium">Lade Nachhilfe Rechnungs-Tool...</p>
                     </div>
                 );
             }
 
             return (
                 <div className="max-w-5xl mx-auto">
-                    {/* Hinweisbanner falls Firebase-Zugangsdaten oder Regeln noch fehlen */}
+                    {/* Hinweisbanner */}
                     {errorMessage && (
                         <div className="no-print bg-amber-50 border-l-4 border-amber-500 p-4 mb-6 rounded-r-lg shadow-sm">
                             <div className="flex items-start">
                                 <span className="text-amber-500 text-2xl mr-3">⚠️</span>
                                 <div>
-                                    <h3 className="font-bold text-amber-800">Firebase Konfigurations-Hinweis</h3>
+                                    <h3 className="font-bold text-amber-800">System-Hinweis</h3>
                                     <p className="text-amber-700 text-sm mt-1">{errorMessage}</p>
                                 </div>
                             </div>
                         </div>
                     )}
 
-                    {/* Navigation (Ausgeblendet beim Drucken) */}
+                    {}
                     {activeTab !== 'printView' && (
                         <div className="no-print bg-white rounded-xl shadow-sm mb-6 p-2 flex flex-wrap gap-2 border border-gray-200">
                             <button 
@@ -277,9 +351,7 @@
                         </div>
                     )}
 
-                    {/* -------------------------------------------------------- */}
-                    {/* ANSICHT 1: GENERATOR (Neue / Bearbeiten)                  */}
-                    {/* -------------------------------------------------------- */}
+                    {}
                     {activeTab === 'generator' && (
                         <div className="bg-white p-6 md:p-10 rounded-xl shadow-lg fade-in border border-gray-100">
                             <div className="text-center mb-8">
@@ -287,7 +359,7 @@
                                     {editingInvoiceId ? '✏️ Rechnung bearbeiten' : 'Rechnungs-Generator'}
                                 </h1>
                                 <p className="text-gray-500">
-                                    {editingInvoiceId ? 'Passe die Daten an und speichere die Änderungen.' : 'Erstelle eine neue Nachhilfe-Rechnung. Die Daten werden sicher gespeichert.'}
+                                    {editingInvoiceId ? 'Passe die Daten an und speichere die Änderungen.' : 'Erstelle eine neue Nachhilfe-Rechnung.'}
                                 </p>
                             </div>
 
@@ -374,85 +446,7 @@
                         </div>
                     )}
 
-                    {/* -------------------------------------------------------- */}
-                    {/* ANSICHT 2: DASHBOARD                                     */}
-                    {/* -------------------------------------------------------- */}
-                    {activeTab === 'dashboard' && (
-                        <div className="bg-white p-6 rounded-xl shadow-lg fade-in border border-gray-100 min-h-[500px]">
-                            <div className="flex flex-col md:flex-row justify-between items-center mb-8 border-b pb-6 border-gray-100">
-                                <div>
-                                    <h1 className="text-3xl font-bold text-gray-800">Deine Rechnungen</h1>
-                                    <p className="text-gray-500">Alle gespeicherten Nachhilfe-Sitzungen in der Cloud.</p>
-                                </div>
-                                <div className="mt-4 md:mt-0 bg-emerald-100 border border-emerald-200 px-6 py-4 rounded-lg shadow-inner text-right">
-                                    <p className="text-emerald-700 text-sm font-bold uppercase tracking-wide">Gesamtumsatz</p>
-                                    <p className="text-3xl font-black text-emerald-900">{totalEarnings.replace('.', ',')} €</p>
-                                </div>
-                            </div>
-
-                            {invoices.length === 0 ? (
-                                <div className="text-center py-20 text-gray-400">
-                                    <p className="text-xl mb-4">Noch keine Rechnungen vorhanden.</p>
-                                    <button onClick={handleNewInvoiceClick} className="text-blue-600 hover:underline font-medium">Erste Rechnung erstellen →</button>
-                                </div>
-                            ) : (
-                                <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                    <table className="w-full text-left border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-50 text-gray-600 border-b border-gray-200">
-                                                <th className="py-3 px-4 font-semibold">Datum</th>
-                                                <th className="py-3 px-4 font-semibold">Schüler</th>
-                                                <th className="py-3 px-4 font-semibold">Fach</th>
-                                                <th className="py-3 px-4 font-semibold">Dauer</th>
-                                                <th className="py-3 px-4 font-semibold text-right">Betrag</th>
-                                                <th className="py-3 px-4 font-semibold text-center">Aktionen</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {invoices.map(inv => (
-                                                <tr key={inv.id} className="border-b border-gray-100 hover:bg-gray-50 transition">
-                                                    <td className="py-3 px-4 text-gray-700">{inv.date ? inv.date.split('-').reverse().join('.') : '-'}</td>
-                                                    <td className="py-3 px-4 font-medium text-gray-900">{inv.studentName}</td>
-                                                    <td className="py-3 px-4 text-gray-600">{inv.subject}</td>
-                                                    <td className="py-3 px-4 text-gray-600">{inv.hours}h {inv.minutes}m</td>
-                                                    <td className="py-3 px-4 font-bold text-gray-900 text-right">{inv.total ? inv.total.replace('.', ',') : '0,00'} €</td>
-                                                    <td className="py-3 px-4 text-center">
-                                                        <div className="flex justify-center space-x-2">
-                                                            <button 
-                                                                onClick={() => handleViewInvoice(inv)}
-                                                                title="Rechnung anzeigen / drucken"
-                                                                className="p-1.5 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition"
-                                                            >
-                                                                👁️
-                                                            </button>
-                                                            <button 
-                                                                onClick={() => handleEditInvoice(inv)}
-                                                                title="Rechnung bearbeiten"
-                                                                className="p-1.5 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded transition"
-                                                            >
-                                                                ✏️
-                                                            </button>
-                                                            <button 
-                                                                onClick={() => handleDeleteInvoice(inv.id)}
-                                                                title="Rechnung löschen"
-                                                                className="p-1.5 bg-red-100 hover:bg-red-200 text-red-600 rounded transition"
-                                                            >
-                                                                🗑️
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {/* -------------------------------------------------------- */}
-                    {/* ANSICHT 3: EINSTELLUNGEN                                 */}
-                    {/* -------------------------------------------------------- */}
+                    {}
                     {activeTab === 'settings' && (
                         <div className="bg-white p-6 md:p-10 rounded-xl shadow-lg fade-in border border-gray-100">
                             <div className="mb-8 border-b pb-4">
@@ -553,15 +547,13 @@
                         </div>
                     )}
 
-                    {/* -------------------------------------------------------- */}
-                    {/* ANSICHT 2: DASHBOARD                                     */}
-                    {/* -------------------------------------------------------- */}
+                    {}
                     {activeTab === 'dashboard' && (
                         <div className="bg-white p-6 rounded-xl shadow-lg fade-in border border-gray-100 min-h-[500px]">
                             <div className="flex flex-col md:flex-row justify-between items-center mb-8 border-b pb-6 border-gray-100">
                                 <div>
                                     <h1 className="text-3xl font-bold text-gray-800">Deine Rechnungen</h1>
-                                    <p className="text-gray-500">Alle gespeicherten Nachhilfe-Sitzungen in der Cloud.</p>
+                                    <p className="text-gray-500">Alle gespeicherten Nachhilfe-Sitzungen.</p>
                                 </div>
                                 <div className="mt-4 md:mt-0 bg-emerald-100 border border-emerald-200 px-6 py-4 rounded-lg shadow-inner text-right">
                                     <p className="text-emerald-700 text-sm font-bold uppercase tracking-wide">Gesamtumsatz</p>
@@ -572,7 +564,7 @@
                             {invoices.length === 0 ? (
                                 <div className="text-center py-20 text-gray-400">
                                     <p className="text-xl mb-4">Noch keine Rechnungen vorhanden.</p>
-                                    <button onClick={() => setActiveTab('generator')} className="text-blue-600 hover:underline font-medium">Erste Rechnung erstellen →</button>
+                                    <button onClick={handleNewInvoiceClick} className="text-blue-600 hover:underline font-medium">Erste Rechnung erstellen →</button>
                                 </div>
                             ) : (
                                 <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -590,11 +582,11 @@
                                         <tbody>
                                             {invoices.map(inv => (
                                                 <tr key={inv.id} className="border-b border-gray-100 hover:bg-gray-50 transition">
-                                                    <td className="py-3 px-4 text-gray-700">{inv.date.split('-').reverse().join('.')}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{inv.date ? inv.date.split('-').reverse().join('.') : '-'}</td>
                                                     <td className="py-3 px-4 font-medium text-gray-900">{inv.studentName}</td>
                                                     <td className="py-3 px-4 text-gray-600">{inv.subject}</td>
                                                     <td className="py-3 px-4 text-gray-600">{inv.hours}h {inv.minutes}m</td>
-                                                    <td className="py-3 px-4 font-bold text-gray-900 text-right">{inv.total.replace('.', ',')} €</td>
+                                                    <td className="py-3 px-4 font-bold text-gray-900 text-right">{inv.total ? inv.total.replace('.', ',') : '0,00'} €</td>
                                                     <td className="py-3 px-4 text-center">
                                                         {deletingInvoiceId === inv.id ? (
                                                             <div className="flex items-center justify-center space-x-1">
@@ -612,13 +604,29 @@
                                                                 </button>
                                                             </div>
                                                         ) : (
-                                                            <button 
-                                                                onClick={() => setDeletingInvoiceId(inv.id)}
-                                                                title="Rechnung löschen"
-                                                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 transition-colors"
-                                                            >
-                                                                🗑️
-                                                            </button>
+                                                            <div className="flex justify-center space-x-2">
+                                                                <button 
+                                                                    onClick={() => handleViewInvoice(inv)}
+                                                                    title="Rechnung anzeigen / drucken"
+                                                                    className="p-1.5 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition"
+                                                                >
+                                                                    👁️
+                                                                </button>
+                                                                <button 
+                                                                    onClick={() => handleEditInvoice(inv)}
+                                                                    title="Rechnung bearbeiten"
+                                                                    className="p-1.5 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded transition"
+                                                                >
+                                                                    ✏️
+                                                                </button>
+                                                                <button 
+                                                                    onClick={() => setDeletingInvoiceId(inv.id)}
+                                                                    title="Rechnung löschen"
+                                                                    className="p-1.5 bg-red-100 hover:bg-red-200 text-red-600 rounded transition"
+                                                                >
+                                                                    🗑️
+                                                                </button>
+                                                            </div>
                                                         )}
                                                     </td>
                                                 </tr>
@@ -630,13 +638,11 @@
                         </div>
                     )}
 
-                    {/* -------------------------------------------------------- */}
-                    {/* ANSICHT 3: DRUCKVORSCHAU (PRINT)                         */}
-                    {/* -------------------------------------------------------- */}
+                    {}
                     {activeTab === 'printView' && currentPrintInvoice && (
                         <div className="bg-white p-10 rounded-xl shadow-lg print-container text-gray-800 fade-in border border-gray-200">
                             
-                            {/* Action-Bar (wird beim Drucken versteckt) */}
+                            {/* Action-Bar */}
                             <div className="no-print mb-8 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-gray-200 pb-4">
                                 <button onClick={() => setActiveTab('dashboard')} className="text-gray-600 hover:text-gray-900 flex items-center font-medium transition">
                                     ← Zurück zum Dashboard
@@ -650,7 +656,7 @@
                             <div className="flex justify-between items-start mb-12">
                                 <div>
                                     <h1 className="text-4xl font-light text-blue-900 tracking-wide mb-2">RECHNUNG</h1>
-                                    <p className="text-gray-500">Datum: <span className="font-medium text-gray-800">{currentPrintInvoice.date.split('-').reverse().join('.')}</span></p>
+                                    <p className="text-gray-500">Datum: <span className="font-medium text-gray-800">{currentPrintInvoice.date ? currentPrintInvoice.date.split('-').reverse().join('.') : '-'}</span></p>
                                 </div>
                             </div>
 
@@ -681,8 +687,8 @@
                                         <tr className="border-b border-gray-100">
                                             <td className="py-4 text-gray-800">{currentPrintInvoice.subject}</td>
                                             <td className="py-4 text-center text-gray-800">{currentPrintInvoice.hours}h {currentPrintInvoice.minutes}m</td>
-                                            <td className="py-4 text-right text-gray-800">{currentPrintInvoice.hourlyRate.toFixed(2).replace('.', ',')} €</td>
-                                            <td className="py-4 text-right font-bold text-gray-900">{currentPrintInvoice.total.replace('.', ',')} €</td>
+                                            <td className="py-4 text-right text-gray-800">{currentPrintInvoice.hourlyRate ? currentPrintInvoice.hourlyRate.toFixed(2).replace('.', ',') : '0,00'} €</td>
+                                            <td className="py-4 text-right font-bold text-gray-900">{currentPrintInvoice.total ? currentPrintInvoice.total.replace('.', ',') : '0,00'} €</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -692,7 +698,7 @@
                             <div className="flex justify-end mb-16">
                                 <div className="text-right bg-blue-50 py-4 px-6 rounded-lg inline-block border border-blue-100">
                                     <p className="text-blue-800 text-sm font-semibold mb-1 uppercase tracking-wider">Rechnungsbetrag</p>
-                                    <p className="text-3xl font-bold text-blue-900">{currentPrintInvoice.total.replace('.', ',')} €</p>
+                                    <p className="text-3xl font-bold text-blue-900">{currentPrintInvoice.total ? currentPrintInvoice.total.replace('.', ',') : '0,00'} €</p>
                                 </div>
                             </div>
 
